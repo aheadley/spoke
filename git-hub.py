@@ -210,7 +210,8 @@ class GithubActor(object):
         except AssertionError:
             pass
 
-    def repos_addremote(self, **kwargs):
+    @ArgFunc.auto_define_args
+    def repos_addremote(self, remote_name=GIT_REMOTE_NAME, **kwargs):
         """Add a remote for the corresponding repo on GitHub
         """
 
@@ -218,20 +219,20 @@ class GithubActor(object):
         if actual_repo is None:
             self._output('It doesn\'t look like you\'re in a git repo right now...')
         else:
-            if self.GIT_REMOTE_NAME in (rm.name for rm in actual_repo.remotes):
+            if remote_name in (rm.name for rm in actual_repo.remotes):
                 self._output('Looks like the "{0}" remote already exists',
-                    self.GIT_REMOTE_NAME)
+                    remote_name)
             else:
                 github_repo = self._github.repos.get(
                     user=kwargs.get('user', self._current_user),
                     repo=kwargs.get('repo', self._get_repo_name(self._current_repo)))
                 if github_repo.permissions['push']:
                     #read-write, use ssh url
-                    actual_repo.create_remote(self.GIT_REMOTE_NAME, github_repo.ssh_url)
+                    actual_repo.create_remote(remote_name, github_repo.ssh_url)
                 else:
                     #read only, use git url
-                    actual_repo.create_remote(self.GIT_REMOTE_NAME, github_repo.git_url)
-                self._output('"{0}" remote added', self.GIT_REMOTE_NAME)
+                    actual_repo.create_remote(remote_name, github_repo.git_url)
+                self._output('"{0}" remote added', remote_name)
 
     @ArgFunc.define_args(
         state={'choices': ('open', 'closed'), 'default': 'open'},
