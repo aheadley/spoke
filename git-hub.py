@@ -6,15 +6,110 @@
 import argparse
 import os
 from pprint import pprint
+import functools
+import inspect
 
 import git
 import pygithub3
+
+def guess_type(obj):
+    ok_types = [int, str, bool]
+    obj_type = type(obj)
+    if obj_type in ok_types:
+        return obj_type
+    else:
+        if obj_type == list or obj_type == tuple:
+            if len(obj):
+                obj_e_type = type(obj[0])
+                if obj_e_type in ok_types and \
+                        all(type(e) == obj_e_type for e in obj[1:]):
+                    return obj_e_type
+        return str
+
+def guess_action(obj):
+    return {
+        bool: 'store_false' if obj else 'store_true',
+    }.get(guess_type(obj), 'store')
+
+def guess_nargs(obj):
+    if guess_type(obj) == bool:
+        return 0
+    else:
+        try:
+            len(obj)
+        except TypeError:
+            return 1
+        else:
+            return '+'
+
+class ArgFunc(object):
+    @staticmethod
+    def define_args(**kwargs):
+        def wrapper(func):
+            for (arg, attrs) in kwargs.iteritems():
+                if 'default' in attrs and 'name' not in attrs:
+                    attrs['name'] = '--' + arg.replace('_', '-')
+                if 'dest' not in attrs and 'name' in attrs:
+                    attrs['dest'] = arg
+            func._argfunc_attrs = kwargs
+            return func
+        return wrapper
+
+    @staticmethod
+    def auto_define_args(func):
+        (args, pargs, kwargs, defaults) = inspect.getargspec(func)
+        if args[0] == 'self' or args[0] == 'cls':
+            args = args[1:]
+        defaults = defaults if defaults is not None else []
+        arg_no_defaults = args[:-len(defaults)]
+        arg_defaults = zip(args[-len(defaults):], defaults)
+        attrs = {}
+        for arg in arg_no_defaults:
+            arg_attrs = {
+                'metavar': arg.upper(),
+            }
+            attrs[arg] = arg_attrs
+        for (arg, default) in arg_defaults:
+            arg_attrs = {
+                'name': '--' + arg.replace('_', '-'),
+                'action': guess_action(default),
+                'default': default,
+                'dest': arg,
+            }
+            attrs[arg] = arg_attrs
+        if pargs is not None:
+            attrs[pargs] = {
+                'name': pargs,
+                'nargs': '*',
+            }
+        if kwargs is not None:
+            pass
+        func._argfunc_attrs = attrs
+        return func
+
+
+    def add_func(self, parser, func):
+        if hasattr(func, '_argfunc_attrs'):
+            for (arg, attrs) in func._argfunc_attrs.iteritems():
+                if 'name' in attrs:
+                    fixed_attrs = attrs.copy()
+                    name = fixed_attrs.pop('name')
+                    fixed_attrs['dest'] = arg
+                    parser.add_argument(name, **fixed_attrs)
+                else:
+                    parser.add_argument(arg, **attrs)
+
+    def add_obj(self, parser, obj):
+        for func in (a for a in dir(obj) \
+                if callable(obj, a) and hasattr(getattr(obj, a), '_argfunc_attrs')):
+            self.add_func(parser, func)
 
 class GithubActor(object):
     """
     """
 
     CONFIG_NS       = 'hub'
+    GIT_REMOTE_NAME = 'github'
 
     _current_repo   = None
     _current_user   = None
@@ -72,31 +167,86 @@ class GithubActor(object):
         return (cfg.get_value(self.CONFIG_NS, 'username'),
             cfg.get_value(self.CONFIG_NS, 'password'))
 
-    def repos_list(self, **kwargs):
-        repos = self._github.repos.list(user=kwargs.get('user', self._current_user),
-            type=kwargs.get('type', 'all')).all()
-        padding = max(len(r.name) for r in repos)
+    def _get_padding(self, f, iterable):
+        return max(len(f(i)) for i in iterable)
+
+    @ArgFunc.define_args(
+        repo_type={'choices': ('all', 'owner', 'public', 'private', 'member'), 'default': 'all'},
+    )
+    def repos_list(self, repo_type='all', **kwargs):
+        """List your or another user's repos
+        """
+
+        repos = self._github.repos.list(
+            user=kwargs.get('user', self._current_user),
+            type=repo_type).all()
+        padding = self._get_padding(lambda r: r.name, repos)
         for repo in repos:
             fork_icon = 'V' if repo.fork else '|'
             self._output(' {fork_icon} {name: <{padding}} -- {description}',
                 fork_icon=fork_icon, padding=padding, **vars(repo))
 
-    def repos_create(self, **kwargs):
-        new_repo = self._github.repos.create(kwargs, in_org=kwargs.get('in_org', None))
-        self._output(new_repo)
+    @ArgFunc.auto_define_args
+    def repos_create(self, name, description='', homepage='', private=False,
+            has_issues=False, has_wiki=False, has_downloads=False, in_org=None,
+            **kwargs):
+        """Create a new repo on GitHub
+        """
 
-    def repos_fork(self, **kwargs):
-        pass
+        data = locals().copy()
+        del data['self'], data['kwargs'], data['in_org']
+        #new_repo = self._github.repos.create(data, in_org)
+        self._output((name, description, homepage, private, has_issues, has_wiki, has_downloads, in_org, kwargs))
+
+    @ArgFunc.auto_define_args
+    def repos_fork(self, repo_name, org=None, **kwargs):
+        """Fork a repo on GitHub to your account (or organization)
+        """
+
+        try:
+            self._github.repos.forks.create(
+                user=kwargs.get('user', self._current_user),
+                repo=repo_name,
+                org=org)
+        except AssertionError:
+            pass
 
     def repos_addremote(self, **kwargs):
-        pass
+        """Add a remote for the corresponding repo on GitHub
+        """
 
-    def pr_list(self, **kwargs):
-        kwargs['user'] = 'overviewer'
+        actual_repo = self._current_repo
+        if actual_repo is None:
+            self._output('It doesn\'t look like you\'re in a git repo right now...')
+        else:
+            if self.GIT_REMOTE_NAME in (rm.name for rm in actual_repo.remotes):
+                self._output('Looks like the "{0}" remote already exists',
+                    self.GIT_REMOTE_NAME)
+            else:
+                github_repo = self._github.repos.get(
+                    user=kwargs.get('user', self._current_user),
+                    repo=kwargs.get('repo', self._get_repo_name(self._current_repo)))
+                if github_repo.permissions['push']:
+                    #read-write, use ssh url
+                    actual_repo.create_remote(self.GIT_REMOTE_NAME, github_repo.ssh_url)
+                else:
+                    #read only, use git url
+                    actual_repo.create_remote(self.GIT_REMOTE_NAME, github_repo.git_url)
+                self._output('"{0}" remote added', self.GIT_REMOTE_NAME)
+
+    @ArgFunc.define_args(
+        state={'choices': ('open', 'closed'), 'default': 'open'},
+    )
+    def pr_list(self, state='open', **kwargs):
+        """List the open pull requests for a repo
+
+        Note that the --state option is currently non-functional
+        """
+
         pull_requests = self._github.pull_requests.list(
             user=kwargs.get('user', kwargs.get('user', self._current_user)),
             repo=kwargs.get('repo', self._get_repo_name(self._current_repo))).all()
-        padding = max(len(pr.user['login']) for pr in pull_requests)
+        padding = self._get_padding(lambda pr: pr.user['login'], pull_requests)
         for pr in pull_requests:
             commit_count = len(self._github.pull_requests.list_commits(pr.number,
                 user=kwargs.get('user', kwargs.get('user', self._current_user)),
@@ -104,15 +254,25 @@ class GithubActor(object):
             self._output('#{number:0>4} {commit_count:0>2}c @{user[login]: <{padding}} {title} -- <{html_url}>',
                 padding=padding, commit_count=commit_count, **vars(pr))
 
-    def pr_merge(self, **kwargs):
-        pass
+    @ArgFunc.auto_define_args
+    def pr_merge(self, pr_number, commit_message='', **kwargs):
+        """Do a simple merge of a pull request (Merge Button)
+        """
+
+        self._github.pull_requests.merge(number, commit_message,
+            user=kwargs.get('user', self._current_user),
+            repo=kwargs.get('repo', self._get_repo_name(self._current_repo)))
+
 
 def build_parser(actor):
+    af = ArgFunc()
     parser = argparse.ArgumentParser(description='git-hub - Do stuff with GitHub',
         prog='git-hub')
     parser.add_argument('--verbose', help='Display more output', action='store_true')
-    sub_parsers = parser.add_subparsers(title='GitHub commands',
-        dest='sub_command')
+    parser.add_argument('--user', help='Override target username', action='store', type=str)
+    parser.add_argument('--repo', help='Override target repo name', action='store', type=str)
+    command_parsers = parser.add_subparsers(title='GitHub commands',
+        dest='command')
 
     #oh god wat
     command_verbs = dict((c, [v.split('_', 1)[1] for v in dir(actor) \
@@ -120,22 +280,22 @@ def build_parser(actor):
         for c in set(c.split('_')[0] for c in dir(actor) \
             if not c.startswith('_') and callable(getattr(actor, c))))
 
-    parent_subparser = argparse.ArgumentParser(add_help=False)
-    parent_subparser.add_argument('verb', metavar='VERB')
-    for sub_command in command_verbs:
-        sub_parser = sub_parsers.add_parser(sub_command)
-        sub_parser.add_argument('verb', metavar='VERB', choices=command_verbs[sub_command])
+    for command in command_verbs:
+        command_parser = command_parsers.add_parser(command)
+        verb_parsers = command_parser.add_subparsers(dest='verb')
+        for verb in command_verbs[command]:
+            verb_parser = verb_parsers.add_parser(verb)
+            af.add_func(verb_parser, getattr(actor, command + '_' + verb))
     return parser
-
-def handle_parsed(actor, parser_result):
-    command_verb = parser_result.sub_command + '_' + parser_result.verb
-    command = getattr(actor, command_verb)
-    return command(**vars(parser_result))
 
 def main():
     actor = GithubActor()
     parser = build_parser(actor)
-    handle_parsed(actor, parser.parse_args())
+    result = parser.parse_args()
+    command_verb = result.command + '_' + result.verb
+    del result.command, result.verb
+    action = getattr(actor, command_verb)
+    return action(**vars(result))
 
 if __name__ == '__main__':
     main()
