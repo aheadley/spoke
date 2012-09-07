@@ -187,7 +187,7 @@ class GithubActor(object):
                 fork_icon=fork_icon, padding=padding, **vars(repo))
 
     @ArgFunc.auto_define_args
-    def repos_create(self, name, description='', homepage='', private=False,
+    def repos_create(self, description='', homepage='', private=False,
             has_issues=False, has_wiki=False, has_downloads=False, in_org=None,
             **kwargs):
         """Create a new repo on GitHub
@@ -195,20 +195,43 @@ class GithubActor(object):
 
         data = locals().copy()
         del data['self'], data['kwargs'], data['in_org']
+        data['name'] = kwargs.get('repo', self._get_repo_name(self._current_repo))
         new_repo = self._github.repos.create(data, in_org)
 
     @ArgFunc.auto_define_args
-    def repos_fork(self, repo_name, org=None, **kwargs):
+    def repos_fork(self, org=None, **kwargs):
         """Fork a repo on GitHub to your account (or organization)
         """
 
         try:
             self._github.repos.forks.create(
                 user=kwargs.get('user', self._current_user),
-                repo=repo_name,
+                repo=kwargs.get('repo', self._get_repo_name(self._current_repo)),
                 org=org)
         except AssertionError:
             pass
+
+    @ArgFunc.auto_define_args
+    def repos_clone(self, **kwargs):
+        repo_name = kwargs.get('repo', None)
+        if repo_name is None:
+            raise ValueError('Use --repo to tell me the repo name')
+        try:
+            github_repo = self._github.repos.get(
+                user=kwargs.get('user', self._current_user),
+                repo=repo_name)
+        except Exception as e:
+            #TODO make this not dumb
+            raise e
+        repo_path = os.path.join(os.getcwd(), repo_name)
+        if github_repo.permissions['push']:
+            git.repo.base.Repo.clone_from(github_repo.ssh_url, repo_path)
+        else:
+            git.repo.base.Repo.clone_from(github_repo.git_url, repo_path)
+        self._output('Cloned {user}/{repo} to {path}',
+            user=kwargs.get('user', self._current_user),
+            repo=repo_name,
+            path=repo_path)
 
     @ArgFunc.auto_define_args
     def repos_addremote(self, remote_name=GIT_REMOTE_NAME, **kwargs):
