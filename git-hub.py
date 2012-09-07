@@ -195,8 +195,7 @@ class GithubActor(object):
 
         data = locals().copy()
         del data['self'], data['kwargs'], data['in_org']
-        #new_repo = self._github.repos.create(data, in_org)
-        self._output((name, description, homepage, private, has_issues, has_wiki, has_downloads, in_org, kwargs))
+        new_repo = self._github.repos.create(data, in_org)
 
     @ArgFunc.auto_define_args
     def repos_fork(self, repo_name, org=None, **kwargs):
