@@ -304,10 +304,8 @@ def build_parser(actor):
             if not c.startswith('_') and callable(getattr(actor, c))))
 
     for command in command_verbs:
-        command_parser = command_parsers.add_parser(command)
-        verb_parsers = command_parser.add_subparsers(dest='verb')
         for verb in command_verbs[command]:
-            verb_parser = verb_parsers.add_parser(verb)
+            verb_parser = command_parsers.add_parser(command + '-' + verb)
             af.add_func(verb_parser, getattr(actor, command + '_' + verb))
     return parser
 
