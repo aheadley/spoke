@@ -171,6 +171,13 @@ class GithubActor(object):
     def _get_padding(self, f, iterable):
         return max(len(f(i)) for i in iterable)
 
+    @ArgFunc.auto_define_args
+    def repos_show(self, **kwargs):
+        """Show info on a specific repo
+        """
+
+        pass
+
     @ArgFunc.define_args(
         repo_type={'choices': ('all', 'owner', 'public', 'private', 'member'), 'default': 'all'},
     )
@@ -287,6 +294,35 @@ class GithubActor(object):
             user=kwargs.get('user', self._current_user),
             repo=kwargs.get('repo', self._get_repo_name(self._current_repo)))
 
+    @ArgFunc.auto_define_args
+    def issues_show(self, issue_number, **kwargs):
+        """Display a specific issue
+        """
+
+        pass
+
+    @ArgFunc.auto_define_args
+    def issues_list(self, **kwargs):
+        """List a repos issues
+        """
+
+        pass
+
+    @ArgFunc.auto_define_args
+    def issues_comment(self, title, comment=None, assignee=None, state='open', milestone=None,
+            labels=None, **kwargs):
+        """Add a comment to an issue
+        """
+
+        pass
+
+    @ArgFunc.auto_define_args
+    def issues_comment(self, title, comment=None, assignee=None, state='open', milestone=None,
+            labels=None, **kwargs):
+        """ Open a new issue
+        """
+
+        pass
 
 def build_parser(actor):
     af = ArgFunc()
