@@ -91,13 +91,14 @@ class ArgFunc(object):
     def add_func(self, parser, func):
         if hasattr(func, '_argfunc_attrs'):
             for (arg, attrs) in func._argfunc_attrs.iteritems():
+                fixed_attrs = attrs.copy()
                 if 'name' in attrs:
-                    fixed_attrs = attrs.copy()
-                    name = fixed_attrs.pop('name')
+                    command_name = fixed_attrs.pop('name')
                     fixed_attrs['dest'] = arg
-                    parser.add_argument(name, **fixed_attrs)
                 else:
-                    parser.add_argument(arg, **attrs)
+                    command_name = arg
+                parser.add_argument(command_name, **fixed_attrs)
+
 
     def add_obj(self, parser, obj):
         for func in (a for a in dir(obj) \
@@ -305,8 +306,14 @@ def build_parser(actor):
 
     for command in command_verbs:
         for verb in command_verbs[command]:
-            verb_parser = command_parsers.add_parser(command + '-' + verb)
-            af.add_func(verb_parser, getattr(actor, command + '_' + verb))
+            cv_func = getattr(actor, command + '_' + verb)
+            attrs = {}
+            try:
+                attrs['help'] = cv_func.__doc__.split('\n')[0].strip()
+            except AttributeError:
+                pass
+            verb_parser = command_parsers.add_parser(command + '-' + verb, **attrs)
+            af.add_func(verb_parser, cv_func)
     return parser
 
 def main():
