@@ -9,6 +9,9 @@ from pprint import pprint
 import functools
 import inspect
 import textwrap
+import tempfile
+import time
+import subprocess
 
 import git
 import pygithub3
@@ -116,6 +119,7 @@ class GithubActor(object):
 
     CONFIG_NS       = 'hub'
     GIT_REMOTE_NAME = 'github'
+    FALLBACK_EDITOR = 'nano'
 
     _current_repo   = None
     _current_user   = None
@@ -180,7 +184,7 @@ class GithubActor(object):
     def _get_padding(self, f, iterable):
         return max(len(f(i)) for i in iterable)
 
-    def require_in_repo(func):
+    def _require_in_repo(func):
         @functools.wraps(func)
         def wrapper(self, *pargs, **kwargs):
             if self._current_repo is None:
@@ -192,6 +196,39 @@ class GithubActor(object):
         except AttributeError:
             pass
         return wrapper
+
+    @ArgFunc.auto_define_args
+    def develop(self, org=None, **kwargs):
+        """Clone a repo so you can start working on it, forking to your account
+        if needed
+        """
+        target_user = kwargs.get('user', self._current_user)
+        target_repo = kwargs.get('repo', self._current_repo_name)
+        if os.path.exists(os.path.join(os.getcwd(), target_repo)):
+            raise ValueError('Looks like the repo already exists at {0}'.format(
+                os.path.join(os.getcwd(), target_repo)))
+        if target_user != self._current_user:
+            #need to fork first
+            self._output('Looks like someone else\'s repo, forking...')
+            try:
+                fork = self._github.repos.forks.create(
+                    user=target_user,
+                    repo=target_repo,
+                    org=org,
+                )
+            except AssertionError:
+                pass
+            self._output('Waiting for GitHub to stop forking around...')
+            time.sleep(5)
+        self._output('Getting repo info...')
+        gh_repo = self._github.repos.get(
+            user=self._current_user,
+            repo=target_repo,
+        )
+        repo_path = os.path.join(os.getcwd(), gh_repo.name)
+        self._output('Cloning repo {0} ...', gh_repo.full_name)
+        git.repo.base.Repo.clone_from(gh_repo.ssh_url, repo_path)
+        self._output('Repo cloned to {0}, enjoy!', repo_path)
 
     @ArgFunc.auto_define_args
     def repos_show(self, **kwargs):
@@ -276,7 +313,7 @@ class GithubActor(object):
             repo=repo_name,
             path=repo_path)
 
-    @require_in_repo
+    @_require_in_repo
     @ArgFunc.auto_define_args
     def repos_addremote(self, remote_name=GIT_REMOTE_NAME, **kwargs):
         """Add a remote for the corresponding repo on GitHub
@@ -338,7 +375,7 @@ class GithubActor(object):
             repo=kwargs.get('repo', self._current_repo_name))
         self._output('Pull request #{0:0>4} merged!', pr_number)
 
-    @require_in_repo
+    @_require_in_repo
     @ArgFunc.auto_define_args
     def pr_addremote(self, pr_number, remote_name=None, **kwargs):
         """Add a remote for the source repo in a PR
@@ -383,7 +420,7 @@ class GithubActor(object):
                 c=comment, wrapped_body=self._wrap_text_body(comment.body))
 
     def _wrap_text_body(self, text, padding=8):
-        """Wrap text so that there are :padding: spaces on either side, based on
+        """Wrap :text: so that there are :padding: spaces on either side, based on
         terminal width
         """
 
@@ -412,19 +449,69 @@ class GithubActor(object):
                     issue=issue)
 
     @ArgFunc.auto_define_args
-    def issues_create(self, title, comment=None, assignee=None, milestone=None,
+    def issues_create(self, title=None, body=None, assignee=None, milestone=None,
             labels=None, **kwargs):
+        """Open a new issue
+        """
+        data = locals().copy()
+        del data['self'], data['kwargs']
+        if data['labels'] is not None:
+            data['labels'] = [l.strip() for l in data['labels'].split(',')]
+        if data['body'] is None:
+            (_, path) = tempfile.mkstemp()
+            with open(path, 'w') as handle:
+                handle.write('# Put the body of your issue here\n' \
+                    '# Lines starting with \'#\' are ignored\n' \
+                    '# If you didn\'t provide a title, the first line here will be used\n')
+            subprocess.call([self._get_editor(), path])
+            with open(path, 'r') as handle:
+                body = [line.rstrip() for line in handle.readlines() \
+                    if not line.startswith('#') and line.strip()]
+            if not data['title']:
+                data['title'] = body[0].strip()
+                data['body'] = '\n'.join(body[1:])
+            else:
+                data['body'] = '\n'.join(body)
+            os.unlink(path)
+        issue = self._github.issues.create(data,
+            user=kwargs.get('user', self._current_user),
+            repo=kwargs.get('repo', self._current_repo_name))
+        self._output('Issue #{issue.number:0>4} created: {issue.html_url}',
+            issue=issue)
+
+    def _get_editor(self):
+        """Get the editor from env variables
+
+        Looks at $EDITOR, then $VISUAL, then falls back to :FALLBACK_EDITOR:
+        """
+        return os.environ.get('EDITOR',
+            os.environ.get('VISUAL',
+                self.FALLBACK_EDITOR))
+
+    @ArgFunc.auto_define_args
+    def issues_comment(self, issue_number, message=None, close=False, **kwargs):
         """Add a comment to an issue
         """
 
-        pass
-
-    @ArgFunc.auto_define_args
-    def issues_comment(self, issue_number, message=None, **kwargs):
-        """ Open a new issue
-        """
-
-        pass
+        if message is None:
+            (_, path) = tempfile.mkstemp()
+            with open(path, 'w') as handle:
+                handle.write('# Write your comment here\n' \
+                    '# Lines starting with \'#\' are ignored\n')
+            subprocess.call([self._get_editor(), path])
+            with open(path, 'r') as handle:
+                message = '\n'.join(line.rstrip() for line in handle.readlines() \
+                    if not line.startswith('#') and line.strip())
+            os.unlink(path)
+        comment = self._github.issues.comments.create(issue_number, message,
+            user=kwargs.get('user', self._current_user),
+            repo=kwargs.get('repo', self._current_repo_name))
+        self._output('Comment {comment.id} added!', comment=comment)
+        if close:
+            self._github.issues.update(issue_number, {'state': 'closed'},
+                user=kwargs.get('user', self._current_user),
+                repo=kwargs.get('repo', self._current_repo_name))
+            self._output('Issue closed')
 
 def build_parser(actor):
     af = ArgFunc()
@@ -456,6 +543,10 @@ def build_parser(actor):
             verb_parser = command_parsers.add_parser(
                 command_verb.replace('_', '-'), **attrs)
             af.add_func(verb_parser, cv_func)
+    develop_parser = command_parsers.add_parser('develop',
+        help=actor.develop.__doc__.split('\n')[0].strip(),
+        parents=[parent_parser])
+    af.add_func(develop_parser, actor.develop)
     return parser
 
 def main():
