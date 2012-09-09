@@ -8,6 +8,7 @@ import os
 from pprint import pprint
 import functools
 import inspect
+import textwrap
 
 import git
 import pygithub3
@@ -41,6 +42,10 @@ def guess_nargs(obj):
             return 1
         else:
             return '+'
+
+def get_console_size():
+    with os.popen('stty size', 'r') as p:
+        return map(int, p.read().strip().split())
 
 class ArgFunc(object):
     @staticmethod
@@ -126,7 +131,7 @@ class GithubActor(object):
 
     def _output(self, obj, *pargs, **kwargs):
         if issubclass(obj.__class__, basestring):
-            print obj.format(*pargs, **kwargs)
+            print unicode(obj).format(*pargs, **kwargs)
         else:
             try:
                 pprint(obj, indent=2)
@@ -144,6 +149,10 @@ class GithubActor(object):
         repo_name = self._get_repo_name(repo)
         return pygithub3.Github(login=username, password=password,
             user=username, repo=repo_name)
+
+    @property
+    def _current_repo_name(self):
+        return self._get_repo_name(self._current_repo)
 
     def _get_repo_name(self, repo):
         if repo is not None:
@@ -171,12 +180,35 @@ class GithubActor(object):
     def _get_padding(self, f, iterable):
         return max(len(f(i)) for i in iterable)
 
+    def require_in_repo(func):
+        @functools.wraps(func)
+        def wrapper(self, *pargs, **kwargs):
+            if self._current_repo is None:
+                self._output('You need to be in a repo for this command')
+            else:
+                return func(self, *pargs, **kwargs)
+        try:
+            wrapper._argfunc_attrs = func._argfunc_attrs
+        except AttributeError:
+            pass
+        return wrapper
+
     @ArgFunc.auto_define_args
     def repos_show(self, **kwargs):
-        """Show info on a specific repo
+        """Show a repo's info from GitHub
         """
 
-        pass
+        display_tpl = '\n'.join([
+            '{repo.full_name: <48} {repo.language: <16} {repo.forks_count: >3} ' \
+                'Fork(s) {repo.watchers_count: >4} Watcher(s)',
+            '{repo.description}',
+            '{repo.html_url: <64} {repo.homepage}',
+        ])
+
+        gh_repo = self._github.repos.get(
+            user=kwargs.get('user', self._current_user),
+            repo=kwargs.get('repo', self._current_repo_name))
+        self._output(display_tpl, repo=gh_repo)
 
     @ArgFunc.define_args(
         repo_type={'choices': ('all', 'owner', 'public', 'private', 'member'), 'default': 'all'},
@@ -203,7 +235,7 @@ class GithubActor(object):
 
         data = locals().copy()
         del data['self'], data['kwargs'], data['in_org']
-        data['name'] = kwargs.get('repo', self._get_repo_name(self._current_repo))
+        data['name'] = kwargs.get('repo', self._current_repo_name)
         new_repo = self._github.repos.create(data, in_org)
 
     @ArgFunc.auto_define_args
@@ -214,13 +246,16 @@ class GithubActor(object):
         try:
             self._github.repos.forks.create(
                 user=kwargs.get('user', self._current_user),
-                repo=kwargs.get('repo', self._get_repo_name(self._current_repo)),
+                repo=kwargs.get('repo', self._current_repo_name),
                 org=org)
         except AssertionError:
             pass
 
     @ArgFunc.auto_define_args
     def repos_clone(self, **kwargs):
+        """Clone a repo from GitHub
+        """
+
         repo_name = kwargs.get('repo', None)
         if repo_name is None:
             raise ValueError('Use --repo to tell me the repo name')
@@ -241,29 +276,37 @@ class GithubActor(object):
             repo=repo_name,
             path=repo_path)
 
+    @require_in_repo
     @ArgFunc.auto_define_args
     def repos_addremote(self, remote_name=GIT_REMOTE_NAME, **kwargs):
         """Add a remote for the corresponding repo on GitHub
         """
 
         actual_repo = self._current_repo
-        if actual_repo is None:
-            self._output('It doesn\'t look like you\'re in a git repo right now...')
+        if remote_name in (rm.name for rm in actual_repo.remotes):
+            self._output('Looks like the "{0}" remote already exists',
+                remote_name)
         else:
-            if remote_name in (rm.name for rm in actual_repo.remotes):
-                self._output('Looks like the "{0}" remote already exists',
-                    remote_name)
+            github_repo = self._github.repos.get(
+                user=kwargs.get('user', self._current_user),
+                repo=kwargs.get('repo', self._current_repo_name))
+            if github_repo.permissions['push']:
+                #read-write, use ssh url
+                actual_repo.create_remote(remote_name, github_repo.ssh_url)
             else:
-                github_repo = self._github.repos.get(
-                    user=kwargs.get('user', self._current_user),
-                    repo=kwargs.get('repo', self._get_repo_name(self._current_repo)))
-                if github_repo.permissions['push']:
-                    #read-write, use ssh url
-                    actual_repo.create_remote(remote_name, github_repo.ssh_url)
-                else:
-                    #read only, use git url
-                    actual_repo.create_remote(remote_name, github_repo.git_url)
-                self._output('"{0}" remote added', remote_name)
+                #read only, use git url
+                actual_repo.create_remote(remote_name, github_repo.git_url)
+            self._output('"{0}" remote added', remote_name)
+
+    @ArgFunc.auto_define_args
+    def pr_show(self, pr_number, DUMMYOPT=None, **kwargs):
+        """Display a pull request
+        """
+
+        pr = self._github.pull_requests.get(pr_number,
+            user=kwargs.get('user', self._current_user),
+            repo=kwargs.get('repo', self._current_repo_name))
+        self._output(vars(pr))
 
     @ArgFunc.define_args(
         state={'choices': ('open', 'closed'), 'default': 'open'},
@@ -276,12 +319,12 @@ class GithubActor(object):
 
         pull_requests = self._github.pull_requests.list(
             user=kwargs.get('user', kwargs.get('user', self._current_user)),
-            repo=kwargs.get('repo', self._get_repo_name(self._current_repo))).all()
+            repo=kwargs.get('repo', self._current_repo_name)).all()
         padding = self._get_padding(lambda pr: pr.user['login'], pull_requests)
         for pr in pull_requests:
             commit_count = len(self._github.pull_requests.list_commits(pr.number,
                 user=kwargs.get('user', kwargs.get('user', self._current_user)),
-                repo=kwargs.get('repo', self._get_repo_name(self._current_repo))).all())
+                repo=kwargs.get('repo', self._current_repo_name)).all())
             self._output('#{number:0>4} {commit_count:0>2}c @{user[login]: <{padding}} {title} -- <{html_url}>',
                 padding=padding, commit_count=commit_count, **vars(pr))
 
@@ -292,24 +335,84 @@ class GithubActor(object):
 
         self._github.pull_requests.merge(number, commit_message,
             user=kwargs.get('user', self._current_user),
-            repo=kwargs.get('repo', self._get_repo_name(self._current_repo)))
+            repo=kwargs.get('repo', self._current_repo_name))
+        self._output('Pull request #{0:0>4} merged!', pr_number)
+
+    @require_in_repo
+    @ArgFunc.auto_define_args
+    def pr_addremote(self, pr_number, remote_name=None, **kwargs):
+        """Add a remote for the source repo in a PR
+        """
+
+        if remote_name is None:
+            remote_name = 'pr-{n:0>4}'.format(n=pr_number)
+
+        repo = self._current_repo
+        pr = self._github.pull_requests.get(pr_number,
+            user=kwargs.get('user', self._current_user),
+            repo=kwargs.get('repo', self._current_repo_name))
+
+        if remote_name in (rm.name for rm in repo.remotes):
+            self._output('Looks like the "{0}" remote already exists',
+                remote_name)
+        else:
+            repo.create_remote(remote_name, pr.head['repo']['git_url'])
+            self._output('"{0}" remote added', remote_name)
+
 
     @ArgFunc.auto_define_args
-    def issues_show(self, issue_number, **kwargs):
+    def issues_show(self, issue_number, DUMMYOPT=None, **kwargs):
         """Display a specific issue
         """
 
-        pass
+        issue = self._github.issues.get(issue_number,
+            user=kwargs.get('user', self._current_user),
+            repo=kwargs.get('repo', self._current_repo_name))
+        msg = [
+            '#{i.number:0>4} ({i.state}) -- {i.title}',
+            '@{i.user.login}:',
+        ]
+        if issue.body:
+            msg.append(self._wrap_text_body(issue.body))
+        self._output('\n'.join(msg), i=issue)
+        comments = self._github.issues.comments.list(issue_number,
+            user=kwargs.get('user', self._current_user),
+            repo=kwargs.get('repo', self._current_repo_name)).all()
+        for comment in comments:
+            self._output('@{c.user.login}:\n{wrapped_body}',
+                c=comment, wrapped_body=self._wrap_text_body(comment.body))
 
-    @ArgFunc.auto_define_args
-    def issues_list(self, **kwargs):
-        """List a repos issues
+    def _wrap_text_body(self, text, padding=8):
+        """Wrap text so that there are :padding: spaces on either side, based on
+        terminal width
         """
 
-        pass
+        console_width = max(get_console_size()[1], padding * 3)
+        return '\n'.join(' ' * padding + line \
+            for line in textwrap.wrap(text.strip(), console_width - (padding * 2)))
 
     @ArgFunc.auto_define_args
-    def issues_comment(self, title, comment=None, assignee=None, state='open', milestone=None,
+    def issues_list(self, milestone='none', state='open', assignee='none', labels='',
+            sort='created', **kwargs):
+        """List a repo's issues
+        """
+
+        issues = self._github.issues.list_by_repo(
+            user=kwargs.get('user', self._current_user),
+            repo=kwargs.get('repo', self._current_repo_name),
+            state=state,
+            assignee=assignee,
+            milestone=milestone,
+            labels=labels,
+            sort=sort,
+        )
+        for page in issues:
+            for issue in page:
+                self._output('#{issue.number:0>4} ({issue.state}) @{issue.user.login: <16} -- {issue.title}',
+                    issue=issue)
+
+    @ArgFunc.auto_define_args
+    def issues_create(self, title, comment=None, assignee=None, milestone=None,
             labels=None, **kwargs):
         """Add a comment to an issue
         """
@@ -317,8 +420,7 @@ class GithubActor(object):
         pass
 
     @ArgFunc.auto_define_args
-    def issues_comment(self, title, comment=None, assignee=None, state='open', milestone=None,
-            labels=None, **kwargs):
+    def issues_comment(self, issue_number, message=None, **kwargs):
         """ Open a new issue
         """
 
@@ -329,10 +431,12 @@ def build_parser(actor):
     parser = argparse.ArgumentParser(description='git-hub - Do stuff with GitHub',
         prog='git-hub')
     parser.add_argument('--verbose', help='Display more output', action='store_true')
-    parser.add_argument('--user', help='Override target username', action='store', type=str)
-    parser.add_argument('--repo', help='Override target repo name', action='store', type=str)
     command_parsers = parser.add_subparsers(title='GitHub commands',
         dest='command')
+
+    parent_parser = argparse.ArgumentParser(add_help=False)
+    parent_parser.add_argument('-u', '--user', help='Override target username')
+    parent_parser.add_argument('-r', '--repo', help='Override target repo name')
 
     #oh god wat
     command_verbs = dict((c, [v.split('_', 1)[1] for v in dir(actor) \
@@ -342,13 +446,15 @@ def build_parser(actor):
 
     for command in command_verbs:
         for verb in command_verbs[command]:
-            cv_func = getattr(actor, command + '_' + verb)
-            attrs = {}
+            command_verb = command + '_' + verb
+            cv_func = getattr(actor, command_verb)
+            attrs = {'parents': [parent_parser]}
             try:
                 attrs['help'] = cv_func.__doc__.split('\n')[0].strip()
             except AttributeError:
                 pass
-            verb_parser = command_parsers.add_parser(command + '-' + verb, **attrs)
+            verb_parser = command_parsers.add_parser(
+                command_verb.replace('_', '-'), **attrs)
             af.add_func(verb_parser, cv_func)
     return parser
 
@@ -356,8 +462,8 @@ def main():
     actor = GithubActor()
     parser = build_parser(actor)
     result = parser.parse_args()
-    command_verb = result.command + '_' + result.verb
-    del result.command, result.verb
+    command_verb = result.command.replace('-', '_')
+    del result.command
     action = getattr(actor, command_verb)
     return action(**vars(result))
 
