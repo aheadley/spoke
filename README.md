@@ -1,4 +1,4 @@
-git-hub
+spoke
 =======
 
 Git plugin for GitHub integration. Not written/provided/endorsed/supported/etc
@@ -12,9 +12,9 @@ or get the clone URL so I wrote a plugin to do it all from git.
 Run it like any other ``git`` command:
 ~~~~
 $ git hub -h
-usage: git-hub [-h] [--verbose] [--user USER] [--repo REPO] {pr,repos} ...
+usage: git hub [-h] [--verbose] [--user USER] [--repo REPO] {pr,repos} ...
 
-git-hub - Do stuff with GitHub
+spoke - Do stuff with GitHub
 
 optional arguments:
   -h, --help   show this help message and exit
@@ -64,10 +64,10 @@ fix this but for now you'll have to make due.
 The basic outline is:
   * Clone the repo to somewhere
   * Install the requirements in a virtualenv or at the system level
-  * Change the shebang line in ``git-hub.py`` to use the python from the virtualenv
+  * Change the shebang line in ``spoke.py`` to use the python from the virtualenv
     (if you used one) or the system python (otherwise other virtualenvs will mess
     things up)
-  * Either symlink to ``git-hub.py`` from somewhere in your path (to use the command
+  * Either symlink to ``spoke.py`` from somewhere in your path (to use the command
     by itself, which works fine) or from ``/usr/libexec/git-core/git-hub`` to add to
     ``git``
 
